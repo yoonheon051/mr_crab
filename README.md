@@ -19,9 +19,80 @@ OpenManipulator-X를 ROS 2 Jazzy에서 켜고, 끄고, 움직이는 스크립트
 | `ready.json` | 브링업 자세 (bringup이 켜질 때 팔이 가는 자세). 손 따라가기의 검지 제스처 목표 |
 | `dance.py` | 춤 동작 실행 후 홈 자세로 복귀 |
 | `moveit.sh` | MoveIt 실행 (bringup이 켜진 상태에서) |
-| `gripper_reboot.sh` | 그리퍼 모터 재부팅 |
+| `gripper_reboot.sh` | 그리퍼 모터 재부팅 (bringup은 꺼 둔 상태에서) |
+| `_run.sh` | 공통부: `dialout` 그룹이 셸에 없으면 `sg`로 다시 실행하고 `env.sh`를 source |
+| `models/hand_landmarker.task` | 손 인식 모델 (MediaPipe). hand_follow·hand_teleop이 씀 |
+
+## 동작 흐름
+
+### 구성
+
+```mermaid
+flowchart LR
+    BU["bringup.sh"] --> L["ros2 launch<br/>open_manipulator_x"]
+    BU --> CAM["usb_cam · C270<br/>/camera1/image_raw"]
+    BU --> DB["dashboard.py<br/>127.0.0.1:8765 + 토큰"]
+    L <--> HW["OpenManipulator-X<br/>/dev/ttyACM0"]
+    DB <-- "웹소켓 /ws: 관절·영상·명령" --> BR["브라우저 앱 창"]
+    DB <-- "웹소켓 /term: bash" --> BR
+    CAM --> DB
+    CAM --> HF["hand_follow.py<br/>카메라가 팔 끝"]
+    RS["RealSense 컬러 영상"] --> HT["hand_teleop.py<br/>카메라 고정"]
+    HF -- "/camera1/image_hand" --> DB
+    HF & HT -- "/arm_controller/joint_trajectory" --> L
+    HF & HT & DB & DN -- "그리퍼 액션" --> L
+    DB & GH["go_home.py"] & DN["dance.py"] -- "follow_joint_trajectory 액션" --> L
+    L -- "/joint_states" --> DB & HF & HT
+```
+
+### bringup 켜기 → 끄기
+
+```mermaid
+flowchart TD
+    A(["./bringup.sh"]) --> B{"dialout 그룹 적용됨?"}
+    B -- 아니요 --> B2["sg dialout 으로 다시 실행"] --> C
+    B -- 예 --> C["env.sh: Jazzy, FastDDS, LOCALHOST<br/>PID 파일 기록"]
+    C --> D["launch 시작<br/>별도 세션이라 Ctrl+C가 바로 가지 않음"]
+    D --> E{"OMX_CAM=0?"}
+    E -- 아니요 --> E2["usb_cam 실행<br/>못 찾으면 건너뜀"]
+    E -- 예 --> F
+    E2 --> F{"OMX_DASH=0?"}
+    F -- 아니요 --> F2["dashboard.py 실행<br/>토큰 URL로 Chrome 앱 창 열기"]
+    F -- 예 --> G
+    F2 --> G[["launch 끝날 때까지 대기"]]
+    G -- "Ctrl+C · stop.sh · 터미널 닫힘" --> H["대시보드 제어 잠금<br/>go_home.py로 홈 자세 이동"]
+    H -- "Ctrl+C 한 번 더" --> I["홈 이동 중단"]
+    H --> J["홈 이동 결과 기록<br/>launch에 Ctrl+C 전달"]
+    I --> J
+    J --> K["카메라·대시보드 종료<br/>3초 뒤 남은 프로세스 강제 종료"]
+    K --> Z(["끝 · stop.sh는 결과에 따라<br/>전원 꺼도 됨 / 경고 알림"])
+```
+
+### 손 따라가기 한 프레임 처리 (hand_follow)
+
+```mermaid
+flowchart TD
+    A["카메라 프레임"] --> B["MediaPipe 손 인식"]
+    B --> C{"손이 보임?"}
+    C -- 아니요 --> C2(["팔·그리퍼 그대로 멈춤"])
+    C -- 예 --> D{"제스처<br/>연속 프레임으로 확정"}
+    D -- "검지만 폄 · 10프레임" --> E["브링업 자세로 이동<br/>도착 후 검지 풀 때까지 대기"]
+    D -- "중지·약지 접음 · 4프레임" --> F["HOLD: 그 자리 정지"]
+    D -- 그 외 --> G["손 위치·크기 필터<br/>One Euro"]
+    G --> H["joint1 좌우, joint4 상하<br/>비례제어"]
+    G --> I["손 크기로 앞뒤 거리<br/>joint2·3 역기구학"]
+    H & I --> J["관절 한계·최소 높이·속도 제한"]
+    J --> K["목표가 바뀌었을 때만<br/>joint_trajectory 전송"]
+    D -- "주먹 · 4프레임" --> L["그리퍼 닫기"]
+    D -- "손 폄 · 4프레임" --> M["그리퍼 열기"]
+    K & E & F & L & M --> N["뼈대 그린 영상<br/>/camera1/image_hand"]
+```
+
+hand_teleop도 제스처 처리는 같고, 손의 **화면 위치를 팔 자세에 바로 대응**시키는 점만 다릅니다(가운데 = `teleop_pose.json`, 좌우 → joint1, 위아래 → 끝점 높이).
 
 ## 실행하는 법
+
+이 저장소를 `~/mr_crab_ws`로 받았다고 가정합니다(`git clone https://github.com/yoonheon051/mr_crab.git ~/mr_crab_ws`).
 
 1. 로봇 전원을 켜고 USB로 연결해 `/dev/ttyACM0`가 보이는지 확인합니다.
    ```bash
@@ -60,7 +131,7 @@ OpenManipulator-X를 ROS 2 Jazzy에서 켜고, 끄고, 움직이는 스크립트
 
 - 동작을 실행하기 전에 팔 주변을 비우세요. 홈 자세는 접힌 자세이고, 동작 중에는 팔이 크게 회전합니다.
 - `dance.py`의 속도는 `MAX_SPEED`(기본 1.2 rad/s)로, 동작은 `STEPS`로 바꿀 수 있습니다. 관절 한계는 joint2 ±1.5, joint3 -1.5~1.4, joint4 -1.7~1.97 rad입니다.
-- `stop.sh`는 `mr_crab_ws/bringup.sh` 경로로 실행된 프로세스만 찾습니다. 예전 경로(`open_manipulator_ws`)로 띄운 bringup은 `pkill -INT -f "ros2 launch open_manipulator_bringup"`으로 종료하세요.
+- `stop.sh`는 `bringup.sh`가 켜질 때 남긴 PID 파일(`/tmp/mr_crab_bringup.pid`)로 프로세스를 찾습니다. `bringup.sh`를 거치지 않고 직접 띄운 launch는 `pkill -INT -f "ros2 launch open_manipulator_bringup"`으로 종료하세요(이때는 홈 이동을 하지 않습니다).
 
 ## 카메라 영상이 끊길 때
 
@@ -82,7 +153,7 @@ cd ~/mr_crab_ws
   - **주먹**(네 손가락 모두 접힘) → 그리퍼 닫기 / **손 펴기**(접힌 손가락 1개 이하) → 그리퍼 열기. 4프레임 연속일 때만 바뀝니다(`--confirm`).
   - **정지**: 중지·약지를 접고 새끼는 펴면(검지는 상관없음) 팔이 그 자리에서 멈추고(`HOLD`), 풀면 다시 따라갑니다. 그리퍼는 그대로입니다.
   - **검지(브링업 자세)**: 검지만 펴고 나머지 셋을 접으면 **브링업 자세**(`ready.json` = bringup이 켜질 때 팔이 가는 자세 `[0, -1.0, 1.0, 0]`, 팔이 펴져 있어 추적을 이어가기 좋음)로 0.35 rad/s로 천천히 이동합니다(`--home-speed`). 접힌 홈 자세로 보내려면 `--pose-file home.json`, 다른 자세는 JSON 파일을 만들어 지정합니다. 큰 동작이라 10프레임 연속일 때만 발동하고(`--home-confirm`), 이동 중에는 추적을 멈추며, 중지·약지를 접으면(정지 제스처) 중단합니다. 도착하면 `자세 도착`이 찍히고, 검지를 풀 때까지 대기하다가 풀면 그 자세에서 다시 추적합니다. 계속 검지를 들고 있어도 다시 출발하지 않습니다. **Ctrl+C로 종료해도 이미 시작된 이동은 계속됩니다.** 충돌 감지는 없으니 팔이 움직이는 경로를 비워 두세요.
-- **주먹**(네 손가락 모두 접힘, 4프레임 연속) → 그리퍼 닫기, **손 펴기**(접힌 손가락 1개 이하) → 열기. 손이 안 보이면 그리퍼와 팔 모두 그 상태로 멈춥니다.
+- 손이 안 보이면 그리퍼와 팔 모두 그 상태로 멈춥니다.
 - **처음에는 반드시 팔 주변을 비우고 `--dry-run` 후, 손을 천천히 움직여 방향을 확인하세요.** 손을 화면 오른쪽/아래로 옮겼을 때 팔이 반대로 돌면 `--pan-sign 1`(기본 -1), `--tilt-sign -1`(기본 1)로 뒤집습니다.
 - 주요 옵션: `--gain`(기본 0.8, 클수록 빠름/흔들림), `--max-rate`(0.4 rad/s), `--deadband`(0.06), `--pan-range`(±1.5 rad), `--tilt-min/--tilt-max`(-1.0~1.5), `--no-gripper`, `--confirm`(4). 전체는 `./hand_follow.sh --help`.
 - **앞뒤 이동**: 손이 화면에서 차지하는 크기(손바닥 대각선/화면 높이)를 거리 대용으로 씁니다. 시작할 때 손 크기(15프레임 평균)를 기준으로 삼고, 손이 작아지면(멀어지면) 다가가고 커지면(가까워지면) 물러납니다. joint2·3을 평면 역기구학으로 풀어 카메라가 시선 방향으로 평행 이동하고 joint4가 기울기를 보상합니다. 시작하면 먼저 손을 원하는 거리에 두세요(기준이 정해지면 `[hand] 기준 손 크기 …` 출력). 반대로 움직이면 `--depth-sign -1`, 끄려면 `--no-depth`, 기준값을 직접 주려면 `--ref-size`. 안전장치: 허용 오차 18%, 최대 0.06m/s, 한 번의 추적에서 최대 ±0.12m, 끝점·joint4 최소 높이 0.05m, 관절 한계 도달 시 그 방향 이동 중단(화면에 `limit: …` 표시). 손을 돌리거나 기울이면 크기가 변해 팔이 조금 움직일 수 있습니다.
@@ -105,7 +176,7 @@ ros2 launch realsense2_camera rs_launch.py enable_depth:=false rgb_camera.color_
 ./hand_teleop.sh --dry-run                       # 1) 인식만 확인 (기본 토픽 /camera/camera/color/image_raw)
 ./hand_teleop.sh                                 # 2) 실제 제어. C270으로 시험하려면 --topic /camera1/image_raw
 ```
-- 손이 화면 **가운데**면 팔은 기준 자세(`teleop_pose.json`), 손이 **좌우**로 가면 joint1이 회전(화면 끝에서 ±0.8rad, `--yaw-range`), **위아래**로 가면 끝점 높이가 변합니다(화면 끝에서 ±8cm, `--z-range`). 높이는 평면 역기구학으로 joint2·3을 풀고 joint4가 그리퍼 피치를 그대로 유지합니다. 모든 관절이 같은 비율로 동시에 움직이고(속도 `--max-speed` 0.5rad/s), 관절 한계·최소 높이(`--min-height`)를 넘으면 그 범위 안에서 멈춥니다.
+- 손이 화면 **가운데**면 팔은 기준 자세(`teleop_pose.json`), 손이 **좌우**로 가면 joint1이 회전(화면 끝에서 ±0.8rad, `--yaw-range`. 기준 자세에서 최대 ±1.2rad, `--pan-range`), **위아래**로 가면 끝점 높이가 변합니다(화면 끝에서 ±8cm, `--z-range`). 높이는 평면 역기구학으로 joint2·3을 풀고 joint4가 그리퍼 피치를 그대로 유지합니다. 모든 관절이 같은 비율로 동시에 움직이고(속도 `--max-speed` 0.5rad/s), 관절 한계·최소 높이(`--min-height`)를 넘으면 그 범위 안에서 멈춥니다.
 - **방향이 반대면**: 손을 오른쪽으로 옮겼을 때 팔이 반대로 가면 `--pan-sign 1`(기본 -1, 카메라가 로봇과 같은 방향을 볼 때), 손을 올렸는데 팔이 내려가면 `--z-sign -1`. 카메라가 로봇을 마주 보는 거울 배치면 `--pan-sign 1`일 가능성이 큽니다.
 - 가운데 위치는 `--neutral-x/--neutral-y`, 가운데 허용 범위는 `--deadzone`, 반응성은 `--smooth`(클수록 빠름)로 조절합니다.
 - 제스처는 hand_follow와 같습니다: 주먹=그리퍼 닫기, 폄=열기, 중지·약지 접고 새끼 폄=그 자리 정지(풀면 부드럽게 다시 따라감), 검지만 폄=기준 자세로 이동.
