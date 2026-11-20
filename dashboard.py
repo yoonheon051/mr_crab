@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import fcntl
 import json
+import math
 import os
 import pty
 import secrets
@@ -93,6 +94,8 @@ class Bridge(Node):
         if not self.arm_client.wait_for_server(timeout_sec=0.0):
             return False, "arm_controller 액션 서버가 없습니다"
         goal_pos = [(self._clamp(n, target[n]) if clamp else float(target[n])) if n in target else cur[n] for n in ARM]
+        if not all(math.isfinite(g) for g in goal_pos):   # NaN 은 클램프를 그대로 통과하므로 따로 막는다
+            return False, "잘못된 관절 값입니다"
         delta = max(abs(g - cur[n]) for g, n in zip(goal_pos, ARM))
         if delta < 0.005:
             return True, "이미 목표 위치입니다"
@@ -109,6 +112,8 @@ class Bridge(Node):
     def move_gripper(self, pos):
         if self.locked:
             return False, "종료 중이라 제어가 잠겼습니다"
+        if not math.isfinite(pos):
+            return False, "잘못된 그리퍼 값입니다"
         if not self.grip_client.wait_for_server(timeout_sec=0.0):
             return False, "gripper_controller 액션 서버가 없습니다"
         g = GripperCommand.Goal()
@@ -305,9 +310,17 @@ def make_app(bridge, token, port):
                 loop.remove_reader(fd)
             except Exception:
                 pass
+            # bash 를 끝내고 회수한다. waitpid(pid, 0) 으로 막고 기다리면 bash 가 안 끝날 때 대시보드 전체가 멈추므로
+            # 이벤트 루프를 막지 않게 짧게 나눠 확인하고, 2초 안에 안 끝나면 강제 종료한다.
             try:
                 os.kill(pid, signal.SIGHUP)
-                os.waitpid(pid, 0)
+                for _ in range(20):
+                    if os.waitpid(pid, os.WNOHANG)[0]:
+                        break
+                    await asyncio.sleep(0.1)
+                else:
+                    os.kill(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
             except Exception:
                 pass
             try:

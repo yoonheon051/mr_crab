@@ -65,5 +65,8 @@ if res.result() is None:
     print('go_home: 시간 내에 완료되지 않았습니다.', file=sys.stderr)
     sys.exit(3)
 code = res.result().result.error_code
-print('go_home: 완료' if code == 0 else f'go_home: 컨트롤러 error_code={code} (도착 오차 가능)')
+if code != 0:   # 0 이 아니면 stop.sh 가 "전원을 꺼도 됩니다" 대신 자세 확인 경고를 띄우도록 실패 코드로 끝낸다
+    print(f'go_home: 컨트롤러 error_code={code} (홈에 도착하지 못했을 수 있음)', file=sys.stderr)
+    sys.exit(4)
+print('go_home: 완료')
 sys.exit(0)

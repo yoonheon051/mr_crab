@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 
 import hand_follow as hf
-from hand_follow import ARM, HERE, JLIM, HandFollow, fk, run, slew
+from hand_follow import ARM, HERE, JLIM, HandFollow, fk, run
 
 
 def solve_ik(p_target, q2, q3, iters=40):

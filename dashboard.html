@@ -186,8 +186,11 @@ function connect() {
       showJoints(m.joints);
       return;
     }
+    // 이전 프레임 URL은 새 프레임을 넣기 전에 바로 해제한다. (onload에서 해제하면, 로드가 끝나기 전에 다음 프레임이
+    //  오는 경우 그 URL이 영영 해제되지 않아 오래 켜 두면 메모리가 계속 늘어난다)
     const url = URL.createObjectURL(e.data);
-    img.onload = () => { if (lastUrl) URL.revokeObjectURL(lastUrl); lastUrl = url; };
+    if (lastUrl) URL.revokeObjectURL(lastUrl);
+    lastUrl = url;
     img.src = url; nosig.style.display = 'none'; frames++; lastFrame = Date.now();
   };
 }
